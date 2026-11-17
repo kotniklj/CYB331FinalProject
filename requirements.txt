@@ -1,0 +1,8 @@
+# The pipeline's own Python (run_pipeline.py, triage.py) uses ONLY the standard
+# library — nothing to pip install for it.
+#
+# External tools (install via each tool's own instructions, not pip here):
+#   - docker            (to run OWASP Juice Shop)
+#   - sqlmap            SQL injection
+#   - dalfox            XSS   (Go: `go install github.com/hahwul/dalfox/v2@latest`)
+#   - fuxploider        file upload (git clone + pip install -r its requirements)

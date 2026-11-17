@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+triage.py — parse the scanners' raw output into ranked, de-duplicated findings.
+
+Reads results/{sqlmap,dalfox,fuxploider}.txt, extracts whether each tool found
+its vulnerability class, maps each to a CWE + OWASP Top-10 category, ranks by
+severity, and writes:
+    results/findings.json   — structured findings
+    results/report.html     — a readable report for the demo
+and prints a summary table.
+
+The parsing is intentionally simple (string signals in each tool's output) and
+is a good place for each member to harden their own class — see branch_plans/.
+"""
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+RES = ROOT / "results"
+
+SEV_ORDER = {"High": 0, "Medium": 1, "Low": 2, "None": 3}
+
+# How to recognize a hit in each tool's raw output, + the finding metadata.
+DETECTORS = {
+    "sqlmap": {
+        "signals": [r"is vulnerable", r"injectable", r"identified the following injection",
+                    r"Parameter:\s*email"],
+        "vuln": "SQL Injection", "tool": "sqlmap",
+        "endpoint": "/rest/user/login (email)",
+        "cwe": "CWE-89", "owasp": "A03:2021 Injection", "severity": "High",
+    },
+    "dalfox": {
+        "signals": [r"\[POC\]", r"triggered", r"\bVULN\b", r"Found.*XSS"],
+        "vuln": "Cross-Site Scripting", "tool": "Dalfox",
+        "endpoint": "/rest/products/search (q)",
+        "cwe": "CWE-79", "owasp": "A03:2021 Injection", "severity": "Medium",
+    },
+    "fuxploider": {
+        "signals": [r"found valid", r"successfully uploaded", r"accepted extension",
+                    r"valid extension"],
+        "vuln": "Unrestricted File Upload", "tool": "fuxploider",
+        "endpoint": "/file-upload",
+        "cwe": "CWE-434", "owasp": "A04:2021 Insecure Design", "severity": "High",
+    },
+}
+
+
+def scan_output(tool: str, meta: dict):
+    f = RES / f"{tool}.txt"
+    if not f.exists():
+        return {**_blank(meta), "status": "not run"}
+    text = f.read_text(errors="ignore")
+    for sig in meta["signals"]:
+        m = re.search(sig, text, re.IGNORECASE)
+        if m:
+            # grab a short evidence line around the match
+            line = next((l.strip() for l in text.splitlines()
+                         if re.search(sig, l, re.IGNORECASE)), m.group(0))
+            return {
+                "vuln": meta["vuln"], "tool": meta["tool"], "endpoint": meta["endpoint"],
+                "cwe": meta["cwe"], "owasp": meta["owasp"], "severity": meta["severity"],
+                "detected": True, "status": "detected",
+                "evidence": line[:160],
+            }
+    return {**_blank(meta), "status": "no finding"}
+
+
+def _blank(meta):
+    return {"vuln": meta["vuln"], "tool": meta["tool"], "endpoint": meta["endpoint"],
+            "cwe": meta["cwe"], "owasp": meta["owasp"], "severity": "None",
+            "detected": False, "evidence": ""}
+
+
+def main():
+    RES.mkdir(exist_ok=True)
+    findings = [scan_output(tool, meta) for tool, meta in DETECTORS.items()]
+    # rank: detected first, then by severity
+    findings.sort(key=lambda x: (not x["detected"], SEV_ORDER.get(x["severity"], 9)))
+
+    (RES / "findings.json").write_text(json.dumps(findings, indent=2))
+    write_report(findings)
+
+    detected = sum(1 for f in findings if f["detected"])
+    print(f"\n{'VULN CLASS':<26}{'TOOL':<12}{'SEVERITY':<10}{'STATUS'}")
+    print("-" * 64)
+    for f in findings:
+        mark = "FOUND" if f["detected"] else f["status"]
+        print(f"{f['vuln']:<26}{f['tool']:<12}{f['severity']:<10}{mark}")
+    print("-" * 64)
+    print(f"{detected}/3 vulnerability classes detected -> results/report.html")
+
+
+def write_report(findings):
+    rows = ""
+    for f in findings:
+        badge = "#3fb950" if f["detected"] else "#8b949e"
+        status = "DETECTED" if f["detected"] else f.get("status", "—")
+        rows += (f"<tr><td><b>{f['vuln']}</b></td><td>{f['tool']}</td>"
+                 f"<td>{f['endpoint']}</td><td>{f['cwe']}</td><td>{f['owasp']}</td>"
+                 f"<td>{f['severity']}</td>"
+                 f"<td style='color:{badge};font-weight:700'>{status}</td></tr>"
+                 f"<tr><td colspan='7' style='color:#8b949e;font-size:.85em'>"
+                 f"{f.get('evidence','') or ''}</td></tr>")
+    detected = sum(1 for f in findings if f["detected"])
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<title>CYB331 — Juice Shop Findings</title><style>
+ body{{font-family:system-ui,Arial,sans-serif;margin:2rem;background:#0f1419;color:#e6edf3}}
+ h1{{font-size:1.4rem}} table{{border-collapse:collapse;width:100%;margin-top:1rem}}
+ th,td{{border:1px solid #30363d;padding:.45rem .6rem;text-align:left;font-size:.9rem}}
+ th{{background:#161b22}} .rate{{font-size:2rem;font-weight:700;color:#3fb950}}
+</style></head><body>
+<h1>CYB331 — OWASP Juice Shop: scan &rarr; triage</h1>
+<p>Classes detected this run: <span class="rate">{detected}/3</span></p>
+<table><tr><th>Vulnerability</th><th>Tool</th><th>Endpoint</th><th>CWE</th>
+<th>OWASP</th><th>Severity</th><th>Status</th></tr>{rows}</table>
+<p style="color:#8b949e">Generated by pipeline/triage.py from results/*.txt.
+Local Juice Shop instance only.</p></body></html>"""
+    (RES / "report.html").write_text(html)
+
+
+if __name__ == "__main__":
+    main()
